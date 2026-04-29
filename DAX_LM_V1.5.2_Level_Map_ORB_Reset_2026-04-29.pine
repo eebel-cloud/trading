@@ -1,0 +1,604 @@
+//@version=5
+indicator("DAX Level Map V1.5.2 – Visual Design, DOL & ORB Reset", overlay=true, max_lines_count=100, max_labels_count=100)
+
+// =====================================================
+// 0. FARBEN
+// =====================================================
+C_WHITE   = color.rgb(255, 255, 255)
+C_GRAY    = color.rgb(128, 128, 128)
+C_DARK    = color.rgb(15, 25, 50)
+C_GREEN   = color.rgb(0, 180, 90)
+C_D_GREEN = color.rgb(0, 100, 0)
+C_RED     = color.rgb(220, 40, 40)
+C_D_RED   = color.rgb(140, 0, 0)
+C_ORANGE  = color.rgb(255, 165, 0)
+C_BLUE    = color.rgb(0, 112, 255)
+C_TEAL    = color.rgb(0, 150, 150)
+C_MAGENTA = color.rgb(255, 0, 255)
+C_YELLOW  = color.rgb(255, 215, 0)
+
+// Visual Design V1.5.2
+// Farbe = Leveltyp, Linienstärke = Priorität.
+C_PDH    = color.rgb(220, 40, 40)
+C_PDL    = color.rgb(0, 180, 90)
+C_PRE_H  = color.rgb(255, 150, 40)
+C_PRE_L  = color.rgb(0, 170, 170)
+C_ORB_H  = color.rgb(230, 190, 60)
+C_ORB_L  = color.rgb(80, 170, 255)
+C_DOL    = color.rgb(160, 160, 160)
+C_CONFL  = color.rgb(218, 165, 32)
+C_PDC    = color.rgb(190, 190, 190)
+C_WEEK   = color.rgb(140, 120, 190)
+
+// =====================================================
+// 1. INPUTS
+// =====================================================
+grp_main = "Basis"
+trading_session = input.session("0900-1730", "Xetra Session", group=grp_main)
+orb_session     = input.session("0900-0915", "ORB Zeitspanne", group=grp_main)
+preopen_session = input.session("0000-0900", "PRE-XETRA Session", group=grp_main)
+timezone_input  = input.string("Europe/Berlin", "Zeitzone", group=grp_main)
+
+grp_show = "Anzeige"
+show_prev_day   = input.bool(true,  "Previous Day High/Low", group=grp_show)
+show_pdc        = input.bool(false, "Previous Day Close (PDC)", group=grp_show)
+show_prev_week  = input.bool(false, "Previous Week High/Low", group=grp_show)
+show_week_open  = input.bool(false, "Weekly Open", group=grp_show)
+show_dol        = input.bool(true,  "Daily Open Line / Magnet", group=grp_show)
+show_xopen      = input.bool(false, "Xetra Open anzeigen", group=grp_show)
+show_orb        = input.bool(true,  "ORB High/Low", group=grp_show)
+show_preopen    = input.bool(true,  "PRE-XETRA High/Low", group=grp_show)
+show_avwap      = input.bool(true,  "Xetra AVWAP + 1SD Bänder", group=grp_show)
+show_h1_swings  = input.bool(false, "H1 Swing High/Low", group=grp_show)
+
+grp_logic = "Runway Logik"
+use_xopen_runway   = input.bool(false, "Xetra Open in Runway verwenden", group=grp_logic)
+use_preopen_runway = input.bool(true,  "PRE-XETRA Levels in Runway verwenden", group=grp_logic)
+
+atr_len       = input.int(14, "ATR Länge", minval=1, group=grp_logic)
+ok_mult       = input.float(1.5, "Runway OK ab x ATR", step=0.1, group=grp_logic)
+caution_mult  = input.float(0.8, "Runway Caution ab x ATR", step=0.1, group=grp_logic)
+cluster_pts   = input.float(20.0, "Cluster-Nähe in Punkten", step=1.0, group=grp_logic)
+h1_left       = input.int(3, "H1 Pivot links", minval=1, group=grp_logic)
+h1_right      = input.int(3, "H1 Pivot rechts", minval=1, group=grp_logic)
+
+grp_style = "Stil"
+line_transp      = input.int(20, "Grund-Transparenz Hauptlevel", minval=0, maxval=90, group=grp_style)
+minor_transp     = input.int(70, "Transparenz Nebenlevel", minval=0, maxval=95, group=grp_style)
+preopen_transp   = input.int(45, "Transparenz PRE-XETRA Level", minval=0, maxval=90, group=grp_style)
+band_transp      = input.int(85, "AVWAP Band-Transparenz", minval=0, maxval=95, group=grp_style)
+show_bg_sessions = input.bool(true, "Session-Hintergrund anzeigen", group=grp_style)
+
+grp_confl = "Konfluenz"
+show_confluence = input.bool(true, "Konfluenz Hauptlevels markieren", group=grp_confl)
+confluence_tol  = input.float(3.0, "Konfluenz-Toleranz Punkte", minval=0.0, step=0.5, group=grp_confl)
+confl_label_offset = input.int(3, "Label Abstand rechts", minval=0, maxval=50, group=grp_confl)
+
+// =====================================================
+// 2. ZEIT / SESSION
+// =====================================================
+is_xetra  = not na(time(timeframe.period, trading_session + ":1234567", timezone_input))
+is_orb    = not na(time(timeframe.period, orb_session + ":1234567", timezone_input))
+is_pre    = not na(time(timeframe.period, preopen_session + ":1234567", timezone_input))
+
+// Tageswechsel explizit nach eingestellter Zeitzone.
+// Wichtig fuer die DOL: Sie soll am Berliner Kalendertag starten und nicht durch
+// eine instrument-/exchange-seitige Tageslogik bereits vorher umspringen.
+berlin_day   = dayofmonth(time, timezone_input)
+berlin_month = month(time, timezone_input)
+berlin_year  = year(time, timezone_input)
+is_new_day   = ta.change(berlin_day) != 0 or ta.change(berlin_month) != 0 or ta.change(berlin_year) != 0
+is_new_week  = ta.change(time("W")) != 0
+
+is_xetra_start = is_xetra and not is_xetra[1]
+is_pre_start   = is_pre and not is_pre[1]
+
+// =====================================================
+// 3. ATR
+// =====================================================
+atr_val = ta.atr(atr_len)
+
+// =====================================================
+// 4. PREVIOUS DAY / WEEK LEVELS
+// =====================================================
+pd_high  = request.security(syminfo.tickerid, "D", high[1],  barmerge.gaps_off, barmerge.lookahead_on)
+pd_low   = request.security(syminfo.tickerid, "D", low[1],   barmerge.gaps_off, barmerge.lookahead_on)
+pd_close = request.security(syminfo.tickerid, "D", close[1], barmerge.gaps_off, barmerge.lookahead_on)
+
+pw_high = request.security(syminfo.tickerid, "W", high[1], barmerge.gaps_off, barmerge.lookahead_on)
+pw_low  = request.security(syminfo.tickerid, "W", low[1],  barmerge.gaps_off, barmerge.lookahead_on)
+
+// Weekly Open laufende Woche
+var float w_open = na
+if is_new_week or na(w_open)
+    w_open := open
+
+// Daily Open / DOL
+// Reset nur beim echten Kalendertagwechsel in der gewaehlten Zeitzone.
+// Dadurch beginnt die DOL erst mit dem neuen Tag und laeuft nicht aus dem Vortag vor.
+var float d_open = na
+if is_new_day or na(d_open)
+    d_open := open
+
+// Xetra Open
+var float x_open = na
+if is_xetra_start
+    x_open := open
+
+// =====================================================
+// 5. PRE-XETRA HIGH / LOW
+// =====================================================
+var float pre_high = na
+var float pre_low  = na
+
+// Rücksetzen zum neuen Kalendertag oder beim Start der PRE-XETRA-Session
+if is_new_day or is_pre_start
+    pre_high := na
+    pre_low  := na
+
+// Während der PRE-XETRA-Session Hoch/Tief sammeln
+if is_pre
+    pre_high := na(pre_high) ? high : math.max(pre_high, high)
+    pre_low  := na(pre_low)  ? low  : math.min(pre_low, low)
+
+// =====================================================
+// 6. ORB HIGH / LOW 09:00–09:15
+// =====================================================
+var float orb_high = na
+var float orb_low  = na
+
+// V1.5.2:
+// ORB High/Low duerfen nicht aus dem Vortag in den neuen Kalendertag laufen.
+// Deshalb werden sie beim Berliner Tageswechsel zurueckgesetzt und am XETRA-Start
+// noch einmal neu initialisiert. Bis zur neuen ORB-Bildung bleiben sie unsichtbar.
+if is_new_day or is_xetra_start
+    orb_high := na
+    orb_low  := na
+
+if is_orb
+    orb_high := na(orb_high) ? high : math.max(orb_high, high)
+    orb_low  := na(orb_low)  ? low  : math.min(orb_low, low)
+
+// =====================================================
+// 7. XETRA AVWAP + 1SD BÄNDER
+// =====================================================
+var float s_pv  = 0.0
+var float s_v   = 0.0
+var float s_pv2 = 0.0
+
+if is_xetra_start
+    s_pv  := close * nz(volume, 1)
+    s_v   := nz(volume, 1)
+    s_pv2 := close * close * nz(volume, 1)
+else if is_xetra
+    s_pv  += close * nz(volume, 1)
+    s_v   += nz(volume, 1)
+    s_pv2 += close * close * nz(volume, 1)
+else
+    s_pv  := 0.0
+    s_v   := 0.0
+    s_pv2 := 0.0
+
+avwap = is_xetra and s_v > 0 ? s_pv / s_v : na
+
+var_val = is_xetra and s_v > 0 ? math.max(0.0, (s_pv2 / s_v) - avwap * avwap) : na
+std_val = math.sqrt(var_val)
+
+avwap_upper = avwap + std_val
+avwap_lower = avwap - std_val
+
+// =====================================================
+// 8. H1 SWING HIGH / LOW
+// =====================================================
+h1_pivot_high = request.security(syminfo.tickerid, "60", ta.pivothigh(high, h1_left, h1_right), barmerge.gaps_off, barmerge.lookahead_off)
+h1_pivot_low  = request.security(syminfo.tickerid, "60", ta.pivotlow(low, h1_left, h1_right),   barmerge.gaps_off, barmerge.lookahead_off)
+
+var float last_h1_high = na
+var float last_h1_low  = na
+
+if not na(h1_pivot_high)
+    last_h1_high := h1_pivot_high
+
+if not na(h1_pivot_low)
+    last_h1_low := h1_pivot_low
+
+// =====================================================
+// 9. HILFSFUNKTIONEN
+// =====================================================
+f_dist_to_atr(_dist, _atr) =>
+    _atr > 0 ? _dist / _atr : na
+
+f_room_text(_dist, _atr) =>
+    _ratio = f_dist_to_atr(_dist, _atr)
+    na(_dist) or na(_ratio) ? "N/A" : _ratio >= ok_mult ? "OK" : _ratio >= caution_mult ? "CAUTION" : "BLOCK"
+
+f_room_color(_dist, _atr) =>
+    _ratio = f_dist_to_atr(_dist, _atr)
+    na(_dist) or na(_ratio) ? C_GRAY : _ratio >= ok_mult ? C_D_GREEN : _ratio >= caution_mult ? C_ORANGE : C_D_RED
+
+f_fmt_price(_v) =>
+    na(_v) ? "---" : str.tostring(_v, format.mintick)
+
+f_fmt_dist(_v) =>
+    na(_v) ? "---" : str.tostring(_v, "#.0")
+
+f_fmt_atr(_dist, _atr) =>
+    _r = f_dist_to_atr(_dist, _atr)
+    na(_r) ? "---" : str.tostring(_r, "#.00") + " ATR"
+
+// =====================================================
+// LEVEL-KLASSIFIZIERUNG FÜR DASHBOARD
+// =====================================================
+f_level_group(_name) =>
+    _grp = "---"
+    if _name == "PDH" or _name == "PDL"
+        _grp := "L1"
+    else if _name == "PRE-H" or _name == "PRE-L"
+        _grp := "L2"
+    else if _name == "ORB-H" or _name == "ORB-L"
+        _grp := "L3"
+    else if _name == "DOL"
+        _grp := "MAG"
+    else if _name == "PDC"
+        _grp := "REF"
+    else if _name == "PWH" or _name == "PWL"
+        _grp := "WEEK"
+    else if _name == "AVWAP" or _name == "AVWAP+1SD" or _name == "AVWAP-1SD"
+        _grp := "VWAP"
+    else if _name == "X-OPEN"
+        _grp := "X"
+    _grp
+
+f_level_detail(_name) =>
+    _name == "" ? "---" : f_level_group(_name) + " / " + _name
+
+f_room_detail_long(_room, _level_name) =>
+    _room == "OK" ? "frei bis " + f_level_detail(_level_name) : _room == "CAUTION" ? "eng bis " + f_level_detail(_level_name) : _room == "BLOCK" ? "Block: " + f_level_detail(_level_name) : "---"
+
+f_room_detail_short(_room, _level_name) =>
+    _room == "OK" ? "frei bis " + f_level_detail(_level_name) : _room == "CAUTION" ? "eng bis " + f_level_detail(_level_name) : _room == "BLOCK" ? "Block: " + f_level_detail(_level_name) : "---"
+
+// =====================================================
+// 10. NÄCHSTER WIDERSTAND / NÄCHSTE UNTERSTÜTZUNG
+// =====================================================
+var float next_res = na
+var float next_sup = na
+var string next_res_name = ""
+var string next_sup_name = ""
+
+float tmp_res = na
+float tmp_sup = na
+string tmp_res_name = ""
+string tmp_sup_name = ""
+
+// ---------- Resistance-Kandidaten ----------
+if show_prev_day and not na(pd_high) and pd_high > close
+    if na(tmp_res) or pd_high < tmp_res
+        tmp_res := pd_high
+        tmp_res_name := "PDH"
+
+if show_pdc and not na(pd_close) and pd_close > close
+    if na(tmp_res) or pd_close < tmp_res
+        tmp_res := pd_close
+        tmp_res_name := "PDC"
+
+if show_prev_week and not na(pw_high) and pw_high > close
+    if na(tmp_res) or pw_high < tmp_res
+        tmp_res := pw_high
+        tmp_res_name := "PWH"
+
+if show_week_open and not na(w_open) and w_open > close
+    if na(tmp_res) or w_open < tmp_res
+        tmp_res := w_open
+        tmp_res_name := "W-OPEN"
+
+if show_dol and not na(d_open) and d_open > close
+    if na(tmp_res) or d_open < tmp_res
+        tmp_res := d_open
+        tmp_res_name := "DOL"
+
+if use_xopen_runway and not na(x_open) and x_open > close
+    if na(tmp_res) or x_open < tmp_res
+        tmp_res := x_open
+        tmp_res_name := "X-OPEN"
+
+if show_orb and not na(orb_high) and orb_high > close
+    if na(tmp_res) or orb_high < tmp_res
+        tmp_res := orb_high
+        tmp_res_name := "ORB-H"
+
+if use_preopen_runway and not na(pre_high) and pre_high > close
+    if na(tmp_res) or pre_high < tmp_res
+        tmp_res := pre_high
+        tmp_res_name := "PRE-H"
+
+if use_preopen_runway and not na(pre_low) and pre_low > close
+    if na(tmp_res) or pre_low < tmp_res
+        tmp_res := pre_low
+        tmp_res_name := "PRE-L"
+
+if show_avwap and not na(avwap_upper) and avwap_upper > close
+    if na(tmp_res) or avwap_upper < tmp_res
+        tmp_res := avwap_upper
+        tmp_res_name := "AVWAP+1SD"
+
+if show_avwap and not na(avwap) and avwap > close
+    if na(tmp_res) or avwap < tmp_res
+        tmp_res := avwap
+        tmp_res_name := "AVWAP"
+
+if show_h1_swings and not na(last_h1_high) and last_h1_high > close
+    if na(tmp_res) or last_h1_high < tmp_res
+        tmp_res := last_h1_high
+        tmp_res_name := "H1-H"
+
+// ---------- Support-Kandidaten ----------
+if show_prev_day and not na(pd_low) and pd_low < close
+    if na(tmp_sup) or pd_low > tmp_sup
+        tmp_sup := pd_low
+        tmp_sup_name := "PDL"
+
+if show_pdc and not na(pd_close) and pd_close < close
+    if na(tmp_sup) or pd_close > tmp_sup
+        tmp_sup := pd_close
+        tmp_sup_name := "PDC"
+
+if show_prev_week and not na(pw_low) and pw_low < close
+    if na(tmp_sup) or pw_low > tmp_sup
+        tmp_sup := pw_low
+        tmp_sup_name := "PWL"
+
+if show_week_open and not na(w_open) and w_open < close
+    if na(tmp_sup) or w_open > tmp_sup
+        tmp_sup := w_open
+        tmp_sup_name := "W-OPEN"
+
+if show_dol and not na(d_open) and d_open < close
+    if na(tmp_sup) or d_open > tmp_sup
+        tmp_sup := d_open
+        tmp_sup_name := "DOL"
+
+if use_xopen_runway and not na(x_open) and x_open < close
+    if na(tmp_sup) or x_open > tmp_sup
+        tmp_sup := x_open
+        tmp_sup_name := "X-OPEN"
+
+if show_orb and not na(orb_low) and orb_low < close
+    if na(tmp_sup) or orb_low > tmp_sup
+        tmp_sup := orb_low
+        tmp_sup_name := "ORB-L"
+
+if use_preopen_runway and not na(pre_high) and pre_high < close
+    if na(tmp_sup) or pre_high > tmp_sup
+        tmp_sup := pre_high
+        tmp_sup_name := "PRE-H"
+
+if use_preopen_runway and not na(pre_low) and pre_low < close
+    if na(tmp_sup) or pre_low > tmp_sup
+        tmp_sup := pre_low
+        tmp_sup_name := "PRE-L"
+
+if show_avwap and not na(avwap_lower) and avwap_lower < close
+    if na(tmp_sup) or avwap_lower > tmp_sup
+        tmp_sup := avwap_lower
+        tmp_sup_name := "AVWAP-1SD"
+
+if show_avwap and not na(avwap) and avwap < close
+    if na(tmp_sup) or avwap > tmp_sup
+        tmp_sup := avwap
+        tmp_sup_name := "AVWAP"
+
+if show_h1_swings and not na(last_h1_low) and last_h1_low < close
+    if na(tmp_sup) or last_h1_low > tmp_sup
+        tmp_sup := last_h1_low
+        tmp_sup_name := "H1-L"
+
+// Finale Werte setzen
+next_res := tmp_res
+next_sup := tmp_sup
+next_res_name := tmp_res_name
+next_sup_name := tmp_sup_name
+
+float long_dist  = not na(next_res) ? next_res - close : na
+float short_dist = not na(next_sup) ? close - next_sup : na
+
+string long_room  = f_room_text(long_dist, atr_val)
+string short_room = f_room_text(short_dist, atr_val)
+
+color long_col  = f_room_color(long_dist, atr_val)
+color short_col = f_room_color(short_dist, atr_val)
+
+// =====================================================
+// 11. SIMPLE CLUSTER-/MODE-HINWEIS
+// =====================================================
+range_between = not na(next_res) and not na(next_sup) ? next_res - next_sup : na
+
+mode_text = not na(range_between) and range_between <= cluster_pts ? "CLUSTER" : long_room == "OK" and short_room == "OK" ? "FREE" : long_room == "BLOCK" or short_room == "BLOCK" ? "WALL" : "WORK"
+mode_col  = mode_text == "FREE" ? C_D_GREEN : mode_text == "CLUSTER" ? C_ORANGE : mode_text == "WALL" ? C_D_RED : C_TEAL
+
+// =====================================================
+// 12. KONFLUENZ-ERKENNUNG HAUPTLEVELS — V1.5.2
+// =====================================================
+// Ziel: Wenn zwei oder mehr Hauptlevels nahezu auf demselben Preis liegen,
+// wird daraus eine sichtbare Konfluenz-Zone. Bewusst enthalten sind nur:
+// PDH / PDL, PRE-H / PRE-L, ORB-H / ORB-L und DOL.
+// PDC, Previous Week, Xetra Open und AVWAP bleiben in dieser ersten Stufe außen vor.
+
+float[] confl_prices = array.new_float()
+string[] confl_names = array.new_string()
+
+if show_prev_day and not na(pd_high)
+    array.push(confl_prices, pd_high)
+    array.push(confl_names, "PDH")
+
+if show_prev_day and not na(pd_low)
+    array.push(confl_prices, pd_low)
+    array.push(confl_names, "PDL")
+
+if show_preopen and not na(pre_high)
+    array.push(confl_prices, pre_high)
+    array.push(confl_names, "PRE-H")
+
+if show_preopen and not na(pre_low)
+    array.push(confl_prices, pre_low)
+    array.push(confl_names, "PRE-L")
+
+if show_orb and not na(orb_high)
+    array.push(confl_prices, orb_high)
+    array.push(confl_names, "ORB-H")
+
+if show_orb and not na(orb_low)
+    array.push(confl_prices, orb_low)
+    array.push(confl_names, "ORB-L")
+
+if show_dol and not na(d_open)
+    array.push(confl_prices, d_open)
+    array.push(confl_names, "DOL")
+
+int confl_count = 0
+float confl_price = na
+string confl_names_txt = ""
+float confl_dist_to_close = na
+
+if show_confluence and array.size(confl_prices) > 1
+    for i = 0 to array.size(confl_prices) - 1
+        float base_price = array.get(confl_prices, i)
+        int tmp_count = 0
+        float tmp_sum = 0.0
+        string tmp_names = ""
+
+        for j = 0 to array.size(confl_prices) - 1
+            float test_price = array.get(confl_prices, j)
+            string test_name = array.get(confl_names, j)
+
+            if not na(base_price) and not na(test_price) and math.abs(test_price - base_price) <= confluence_tol
+                tmp_count += 1
+                tmp_sum += test_price
+                tmp_names := tmp_names == "" ? test_name : tmp_names + "+" + test_name
+
+        if tmp_count >= 2
+            float tmp_price = tmp_sum / tmp_count
+            float tmp_dist = math.abs(tmp_price - close)
+            bool better_cluster = tmp_count > confl_count or (tmp_count == confl_count and (na(confl_dist_to_close) or tmp_dist < confl_dist_to_close))
+
+            if better_cluster
+                confl_count := tmp_count
+                confl_price := tmp_price
+                confl_names_txt := tmp_names
+                confl_dist_to_close := tmp_dist
+
+bool confl_active = show_confluence and confl_count >= 2 and not na(confl_price)
+string confl_title = confl_active ? "K" + str.tostring(confl_count) + " " + confl_names_txt : "NONE"
+string confl_detail = confl_active ? f_fmt_price(confl_price) + " / Tol " + str.tostring(confluence_tol, "#.0") + " Pkt" : "kein Hauptlevel-Cluster"
+color confl_bg = confl_count >= 2 ? color.new(C_CONFL, 20) : C_GRAY
+color confl_txt_col = confl_count >= 2 ? C_DARK : C_WHITE
+
+// =====================================================
+// 13. PLOTS — VISUAL DESIGN V1.5.2
+// =====================================================
+// Level 1: PDH / PDL = Linienstärke 3
+plot(show_prev_day ? pd_high : na, "PDH", color=color.new(C_PDH, line_transp), linewidth=3, style=plot.style_linebr)
+plot(show_prev_day ? pd_low : na, "PDL", color=color.new(C_PDL, line_transp), linewidth=3, style=plot.style_linebr)
+
+// Optionaler Referenzlevel: PDC standardmäßig aus
+plot(show_pdc ? pd_close : na, "PDC", color=color.new(C_PDC, 70), linewidth=1, style=plot.style_linebr)
+
+// Previous Week: standardmäßig aus, bei Bedarf manuell zuschaltbar
+plot(show_prev_week ? pw_high : na, "PWH", color=color.new(C_WEEK, 60), linewidth=1, style=plot.style_linebr)
+plot(show_prev_week ? pw_low : na, "PWL", color=color.new(C_WEEK, 60), linewidth=1, style=plot.style_linebr)
+
+// Weekly Open
+plot(show_week_open ? w_open : na, "Weekly Open", color=color.new(C_YELLOW, minor_transp), linewidth=1, style=plot.style_linebr)
+
+// Zusatz: DOL / Magnet = Linienstärke 1
+plot(show_dol ? d_open : na, "DOL Magnet", color=color.new(C_DOL, 60), linewidth=1, style=plot.style_linebr)
+
+// Xetra Open optional
+plot(show_xopen ? x_open : na, "Xetra Open", color=color.new(C_BLUE, 45), linewidth=1, style=plot.style_linebr)
+
+// Level 3: ORB High / Low = Linienstärke 1
+plot(show_orb ? orb_high : na, "ORB High", color=color.new(C_ORB_H, 45), linewidth=1, style=plot.style_linebr)
+plot(show_orb ? orb_low : na, "ORB Low", color=color.new(C_ORB_L, 45), linewidth=1, style=plot.style_linebr)
+
+// Level 2: PRE-XETRA High / Low = Linienstärke 2
+plot(show_preopen ? pre_high : na, "PRE-H", color=color.new(C_PRE_H, 35), linewidth=2, style=plot.style_linebr)
+plot(show_preopen ? pre_low : na, "PRE-L", color=color.new(C_PRE_L, 35), linewidth=2, style=plot.style_linebr)
+
+// AVWAP
+plot(show_avwap ? avwap : na, "Xetra AVWAP", color=color.new(C_WHITE, 0), linewidth=2, style=plot.style_linebr)
+plot(show_avwap ? avwap_upper : na, "AVWAP Upper 1SD", color=color.new(C_WHITE, band_transp), linewidth=1, style=plot.style_linebr)
+plot(show_avwap ? avwap_lower : na, "AVWAP Lower 1SD", color=color.new(C_WHITE, band_transp), linewidth=1, style=plot.style_linebr)
+
+// H1 Swings optional
+plot(show_h1_swings ? last_h1_high : na, "H1 Swing High", color=color.new(C_PDH, 72), linewidth=1, style=plot.style_linebr)
+plot(show_h1_swings ? last_h1_low : na, "H1 Swing Low", color=color.new(C_PDL, 72), linewidth=1, style=plot.style_linebr)
+
+// V1.5.2: Konfluenzlinie über Hauptlevels, gedämpftes Gold
+plot(confl_active ? confl_price : na, "KONFLUENZ Hauptlevels", color=color.new(C_CONFL, 22), linewidth=2, style=plot.style_linebr)
+
+// V1.5.2: Rechtes Konfluenz-Label
+var label confl_label = na
+
+if barstate.islast
+    if confl_active
+        if na(confl_label)
+            confl_label := label.new(bar_index + confl_label_offset, confl_price, confl_title, xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, color=color.new(C_CONFL, 20), textcolor=C_DARK, size=size.small)
+        else
+            label.set_xy(confl_label, bar_index + confl_label_offset, confl_price)
+            label.set_text(confl_label, confl_title)
+            label.set_color(confl_label, color.new(C_CONFL, 20))
+            label.set_textcolor(confl_label, C_DARK)
+    else
+        if not na(confl_label)
+            label.delete(confl_label)
+            confl_label := na
+
+// Hintergrund
+bgcolor(show_bg_sessions and is_orb ? color.new(C_GRAY, 90) : na)
+bgcolor(show_bg_sessions and not is_xetra ? color.new(C_RED, 97) : na)
+
+// =====================================================
+// 14. DASHBOARD
+// =====================================================
+var table dash = table.new(position.top_right, 3, 10, bgcolor=color.rgb(15, 25, 50, 90), border_width=1, border_color=color.rgb(40, 60, 100))
+
+if barstate.islast
+    table.cell(dash, 0, 0, "DAX LEVEL MAP", text_color=C_WHITE, bgcolor=C_DARK)
+    table.cell(dash, 1, 0, "STATUS", text_color=C_WHITE, bgcolor=C_DARK)
+    table.cell(dash, 2, 0, "DETAIL", text_color=C_WHITE, bgcolor=C_DARK)
+
+    table.cell(dash, 0, 1, "NEXT RES", text_color=C_WHITE)
+    table.cell(dash, 1, 1, f_fmt_price(next_res), bgcolor=C_D_RED, text_color=C_WHITE)
+    table.cell(dash, 2, 1, f_level_detail(next_res_name), text_color=C_WHITE)
+
+    table.cell(dash, 0, 2, "DIST RES", text_color=C_WHITE)
+    table.cell(dash, 1, 2, f_fmt_dist(long_dist), bgcolor=long_col, text_color=C_WHITE)
+    table.cell(dash, 2, 2, f_fmt_atr(long_dist, atr_val), text_color=C_WHITE)
+
+    table.cell(dash, 0, 3, "NEXT SUP", text_color=C_WHITE)
+    table.cell(dash, 1, 3, f_fmt_price(next_sup), bgcolor=C_D_GREEN, text_color=C_WHITE)
+    table.cell(dash, 2, 3, f_level_detail(next_sup_name), text_color=C_WHITE)
+
+    table.cell(dash, 0, 4, "DIST SUP", text_color=C_WHITE)
+    table.cell(dash, 1, 4, f_fmt_dist(short_dist), bgcolor=short_col, text_color=C_WHITE)
+    table.cell(dash, 2, 4, f_fmt_atr(short_dist, atr_val), text_color=C_WHITE)
+
+    table.cell(dash, 0, 5, "LONG ROOM", text_color=C_WHITE)
+    table.cell(dash, 1, 5, long_room, bgcolor=long_col, text_color=C_WHITE)
+    table.cell(dash, 2, 5, f_room_detail_long(long_room, next_res_name), text_color=C_WHITE)
+
+    table.cell(dash, 0, 6, "SHORT ROOM", text_color=C_WHITE)
+    table.cell(dash, 1, 6, short_room, bgcolor=short_col, text_color=C_WHITE)
+    table.cell(dash, 2, 6, f_room_detail_short(short_room, next_sup_name), text_color=C_WHITE)
+
+    table.cell(dash, 0, 7, "MODE", text_color=C_WHITE)
+    table.cell(dash, 1, 7, mode_text, bgcolor=mode_col, text_color=C_WHITE)
+    table.cell(dash, 2, 7, mode_text == "FREE" ? "beide Seiten offen" : mode_text == "CLUSTER" ? "enge Zone" : mode_text == "WALL" ? "Gegenlevel nah" : "Arbeitsbereich", text_color=C_WHITE)
+
+    table.cell(dash, 0, 8, "CONFLUENCE", text_color=C_WHITE)
+    table.cell(dash, 1, 8, confl_title, bgcolor=confl_bg, text_color=confl_txt_col)
+    table.cell(dash, 2, 8, confl_detail, text_color=C_WHITE)
+
+    table.cell(dash, 0, 9, "ATR", text_color=C_WHITE)
+    table.cell(dash, 1, 9, str.tostring(atr_val, "#.0"), bgcolor=C_GRAY, text_color=C_WHITE)
+    table.cell(dash, 2, 9, "Runway-Basis", text_color=C_WHITE)
